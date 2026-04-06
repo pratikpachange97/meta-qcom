@@ -1,0 +1,87 @@
+From 06ab30a864c97e5aeda6375160ae955aa999a7a5 Mon Sep 17 00:00:00 2001
+From: florian360 <5298202-florian360@users.noreply.gitlab.com>
+Date: Fri, 3 Apr 2026 22:41:26 +0200
+Subject: [PATCH] Fix GCC maybe-uninitialized warning in InnerProduct
+
+Nest the packet accumulators under the existing numPackets and
+numRemPackets guards in inner_product_impl. This matches the real
+dependency chain more closely and avoids GCC 13 warning that
+presult1 may be used uninitialized in the vectorized dot-product
+path.
+
+This was reproduced with a reduced example such as
+A.transpose().row(0).dot(x) under
+-Og -g -ggdb -Wmaybe-uninitialized -Werror, while remaining clean
+at -O3.
+
+Refs libeigen/eigen#3015.
+---
+ Eigen/src/Core/InnerProduct.h | 48 ++++++++++++++++++++---------------
+ 1 file changed, 27 insertions(+), 21 deletions(-)
+
+diff --git a/Eigen/src/Core/InnerProduct.h b/Eigen/src/Core/InnerProduct.h
+index 1e16942..2e2c94c 100644
+--- a/Eigen/src/Core/InnerProduct.h
++++ b/Eigen/src/Core/InnerProduct.h
+@@ -138,31 +138,37 @@ struct inner_product_impl<Evaluator, true> {
+     const UnsignedIndex numPackets = size / PacketSize;
+     const UnsignedIndex numRemPackets = (packetEnd - quadEnd) / PacketSize;
+ 
+-    Packet presult0, presult1, presult2, presult3;
+-
+-    presult0 = eval.template packet<Packet>(0 * PacketSize);
+-    if (numPackets >= 2) presult1 = eval.template packet<Packet>(1 * PacketSize);
+-    if (numPackets >= 3) presult2 = eval.template packet<Packet>(2 * PacketSize);
+-    if (numPackets >= 4) {
+-      presult3 = eval.template packet<Packet>(3 * PacketSize);
+-
+-      for (UnsignedIndex k = 4 * PacketSize; k < quadEnd; k += 4 * PacketSize) {
+-        presult0 = eval.packet(presult0, k + 0 * PacketSize);
+-        presult1 = eval.packet(presult1, k + 1 * PacketSize);
+-        presult2 = eval.packet(presult2, k + 2 * PacketSize);
+-        presult3 = eval.packet(presult3, k + 3 * PacketSize);
++    Packet presult0 = eval.template packet<Packet>(0 * PacketSize);
++    if (numPackets >= 2) {
++      Packet presult1 = eval.template packet<Packet>(1 * PacketSize);
++      if (numPackets >= 3) {
++        Packet presult2 = eval.template packet<Packet>(2 * PacketSize);
++        if (numPackets >= 4) {
++          Packet presult3 = eval.template packet<Packet>(3 * PacketSize);
++
++          for (UnsignedIndex k = 4 * PacketSize; k < quadEnd; k += 4 * PacketSize) {
++            presult0 = eval.packet(presult0, k + 0 * PacketSize);
++            presult1 = eval.packet(presult1, k + 1 * PacketSize);
++            presult2 = eval.packet(presult2, k + 2 * PacketSize);
++            presult3 = eval.packet(presult3, k + 3 * PacketSize);
++          }
++
++          if (numRemPackets >= 1) {
++            presult0 = eval.packet(presult0, quadEnd + 0 * PacketSize);
++            if (numRemPackets >= 2) {
++              presult1 = eval.packet(presult1, quadEnd + 1 * PacketSize);
++              if (numRemPackets == 3) presult2 = eval.packet(presult2, quadEnd + 2 * PacketSize);
++            }
++          }
++
++          presult2 = padd(presult2, presult3);
++        }
++        presult1 = padd(presult1, presult2);
+       }
+ 
+-      if (numRemPackets >= 1) presult0 = eval.packet(presult0, quadEnd + 0 * PacketSize);
+-      if (numRemPackets >= 2) presult1 = eval.packet(presult1, quadEnd + 1 * PacketSize);
+-      if (numRemPackets == 3) presult2 = eval.packet(presult2, quadEnd + 2 * PacketSize);
+-
+-      presult2 = padd(presult2, presult3);
++      presult0 = padd(presult0, presult1);
+     }
+ 
+-    if (numPackets >= 3) presult1 = padd(presult1, presult2);
+-    if (numPackets >= 2) presult0 = padd(presult0, presult1);
+-
+     Scalar result = predux(presult0);
+     for (UnsignedIndex k = packetEnd; k < size; k++) {
+       result = eval.coeff(result, k);
+-- 
+2.34.1
+
